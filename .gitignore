@@ -1,0 +1,36 @@
+# Environment and secrets
+.env*
+*.pem
+*.key
+*-token.txt
+pat-token.txt
+
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+.egg-info/
+dist/
+build/
+*.egg
+
+# Docker
+*.log
+
+# SQL
+*.sqlite
+*.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
