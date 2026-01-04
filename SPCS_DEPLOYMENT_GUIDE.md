@@ -2,6 +2,33 @@
 
 This guide walks you through deploying a **112-byte executable** to Snowflake Snowpark Container Services (SPCS). This is the smallest possible 64-bit Linux ELF binary that prints "Hello, Snowflake" and exits successfully.
 
+## Table of Contents
+
+- [Overview](#overview)
+- [Prerequisites](#prerequisites)
+- [Deployment Steps](#step-1-create-a-snowflake-trial-account)
+  - [Step 1: Create a Snowflake Trial Account](#step-1-create-a-snowflake-trial-account)
+  - [Step 2: Configure Network Access](#step-2-configure-network-access-for-external-tools)
+  - [Step 3: Install Snowflake CLI](#step-3-install-snowflake-cli)
+  - [Step 4: Create a PAT Token](#step-4-create-a-programmatic-access-token-pat)
+  - [Step 5: Configure Snow CLI](#step-5-configure-snow-cli-connection)
+  - [Step 6: Validate Connectivity](#step-6-validate-connectivity)
+  - [Step 7: Create Infrastructure](#step-7-create-snowflake-infrastructure)
+  - [Step 8: Build and Push Docker Image](#step-8-build-and-push-docker-image)
+  - [Step 9: Set Up Event Table](#step-9-set-up-event-table-for-logging)
+  - [Step 10: Run the Job](#step-10-create-and-run-the-job)
+  - [Step 11: Verify Output](#step-11-verify-the-output)
+- [Cleanup](#cleanup)
+- [Quick Reference](#quick-reference)
+- [Automating with Claude Code](#automating-with-claude-code)
+- [Troubleshooting](#troubleshooting)
+- [Technical Details](#about-the-112-byte-binary)
+  - [About the 112-Byte Binary](#about-the-112-byte-binary)
+  - [Building From Source](#building-from-source)
+  - [The 141-Byte Rosetta Version](#the-141-byte-rosetta-version)
+
+---
+
 ## Overview
 
 | Component | Size | Notes |
@@ -51,81 +78,215 @@ All executable code is embedded within the headers themselves - there is literal
 
 ## Prerequisites
 
-- Snowflake account with ACCOUNTADMIN access
-- [Snowflake CLI (`snow`)](https://docs.snowflake.com/en/developer-guide/snowflake-cli/index) installed
 - Docker installed and running
-- The 112-byte binary: `hello_snowflake_64_112`
+- The 112-byte binary: `hello_snowflake_64_112` (included in this repo)
 
 ---
 
-## Step 1: Configure Snowflake CLI
+## Step 1: Create a Snowflake Trial Account
 
-### 1.1 Create a Programmatic Access Token (PAT)
+If you don't have a Snowflake account, create a free trial:
 
-1. Log into Snowsight
-2. Go to **Admin** → **Security** → **Programmatic Access Tokens**
-3. Click **+ Programmatic Access Token**
-4. Name it (e.g., "spcs-deploy") and set expiration
-5. Copy the token and save it to a file:
+1. Go to [https://trial.snowflake.com/](https://trial.snowflake.com/)
+2. Fill in your details and select:
+   - **Cloud Provider**: Any (AWS, Azure, or GCP)
+   - **Region**: Choose one close to you
+   - **Edition**: Enterprise (recommended for SPCS)
+3. Complete email verification
+4. Log into Snowsight at the URL provided in your welcome email
 
-```bash
-echo "YOUR_TOKEN_HERE" > pat-token.txt
-chmod 600 pat-token.txt
+Your account locator will be in the URL, e.g., `https://XXXXXX-YYYYY.snowflakecomputing.com` → account locator is `XXXXXX-YYYYY`.
+
+You can also find your account details in Snowsight:
+
+1. Click your username (bottom-left)
+2. Click **Account** to open Account Details
+3. Copy the **Account identifier** or **Account/Server URL**
+
+![Snowsight Account Details](img/snowsight-account-details.png)
+
+---
+
+## Step 2: Configure Network Access for External Tools
+
+> **Important**: This step must be completed via Snowsight **before** the Snow CLI can connect. Trial accounts often block programmatic access by default.
+
+Create a network policy to allow connections from external tools:
+
+1. Log into Snowsight as ACCOUNTADMIN
+2. Go to **Worksheets** → **+ Worksheet**
+3. Run the following SQL:
+
+```sql
+USE ROLE ACCOUNTADMIN;
+
+CREATE OR REPLACE NETWORK POLICY trial_open_policy
+  ALLOWED_IP_LIST = ('0.0.0.0/0')
+  COMMENT = 'Open access for educational trial account';
+
+-- Apply the policy to your user
+SET current_username = CURRENT_USER();
+ALTER USER IDENTIFIER($current_username) SET NETWORK_POLICY = trial_open_policy;
 ```
 
-### 1.2 Configure the CLI Connection
+> **Security Note**: This policy allows connections from any IP address. For production use, restrict `ALLOWED_IP_LIST` to specific IPs.
 
-Edit `~/.config/snowflake/config.toml`:
+![Snowsight Network Policy](img/snowsight-network-policy.png)
 
-```toml
+---
+
+## Step 3: Install Snowflake CLI
+
+### macOS (Homebrew)
+
+```bash
+brew install snowflake-cli
+```
+
+### macOS/Linux (pip)
+
+```bash
+pip install snowflake-cli
+```
+
+### Windows
+
+```bash
+pip install snowflake-cli
+```
+
+### Verify Installation
+
+```bash
+snow --version
+```
+
+For other installation methods, see the [official documentation](https://docs.snowflake.com/en/developer-guide/snowflake-cli/installation/installation).
+
+---
+
+## Step 4: Create a Programmatic Access Token (PAT)
+
+PAT tokens allow secure, password-less authentication for CLI tools.
+
+### 4.1 Generate Token in Snowsight
+
+1. Log into Snowsight
+2. Click your username (bottom-left) → **Settings**
+3. Go to **User** → **Authentication**
+4. Under **Programmatic access tokens**, click **Generate new token**
+5. Configure the token:
+   - **Name**: `smallest-SPCS` (or any descriptive name)
+   - **Expires In**: 30 days (or your preference)
+6. Click **Generate**
+7. **Copy the token immediately** - it won't be shown again!
+
+![Snowsight PAT Creation](img/snowsight-pat-creation.png)
+
+The token looks like: `eyJraWQiOiJhY2NvdW50...` (a long base64 string)
+
+### 4.2 Save Token to File
+
+Create a file named `.env-token` in the project directory and paste the token content:
+
+**Option A - Using a text editor:**
+1. Create a new file called `.env-token` in the project directory
+2. Paste the token (the entire `eyJraWQi...` string) as the only content
+3. Save the file
+
+**Option B - Using terminal (macOS/Linux):**
+```bash
+# Paste your token between the quotes
+echo "eyJraWQiOiJhY2NvdW50..." > .env-token
+chmod 600 .env-token
+```
+
+**Option C - Using terminal (Windows PowerShell):**
+```powershell
+# Paste your token between the quotes
+"eyJraWQiOiJhY2NvdW50..." | Out-File -FilePath .env-token -Encoding ASCII
+```
+
+> **Important**: The `.env-token` file is already in `.gitignore` to prevent accidental commits.
+
+---
+
+## Step 5: Configure Snow CLI Connection
+
+Add a connection profile to your Snow CLI configuration:
+
+```bash
+# Create config directory if it doesn't exist
+mkdir -p ~/.snowflake
+
+# Add the connection (edit the file)
+cat >> ~/.snowflake/config.toml << 'EOF'
+
 [connections.spcs]
 account = "YOUR_ACCOUNT_LOCATOR"
 user = "YOUR_USERNAME"
 host = "YOUR_ACCOUNT_LOCATOR.snowflakecomputing.com"
 authenticator = "PROGRAMMATIC_ACCESS_TOKEN"
-token_file_path = "/path/to/pat-token.txt"
+token_file_path = "/full/path/to/your/project/.env-token"
+EOF
 ```
 
-### 1.3 Test the Connection
+**Replace the placeholders:**
+- `YOUR_ACCOUNT_LOCATOR`: e.g., `RQBSWTT-AE95171`
+- `YOUR_USERNAME`: Your Snowflake username (e.g., `WKOT`)
+- `/full/path/to/your/project/.env-token`: Absolute path to your token file
 
-```bash
-snow sql -c spcs -q "SELECT CURRENT_USER(), CURRENT_ACCOUNT();"
+Example configuration:
+
+```toml
+[connections.spcs]
+account = "RQBSWTT-AE95171"
+user = "WKOT"
+host = "RQBSWTT-AE95171.snowflakecomputing.com"
+authenticator = "PROGRAMMATIC_ACCESS_TOKEN"
+token_file_path = "/Users/wkot/projects/smallest-spcs/.env-token"
 ```
 
 ---
 
-## Step 2: Create Snowflake Infrastructure
+## Step 6: Validate Connectivity
 
-### 2.1 Create Database and Schema
-
-```sql
--- Create database for the project
-CREATE DATABASE IF NOT EXISTS TINY_SPCS;
-
--- Create schema for the 112-byte binary
-CREATE SCHEMA IF NOT EXISTS TINY_SPCS.TINY_112_BYTES;
-```
-
-Using the CLI:
+Test your connection:
 
 ```bash
-snow sql -c spcs -q "CREATE DATABASE IF NOT EXISTS TINY_SPCS;"
-snow sql -c spcs -q "CREATE SCHEMA IF NOT EXISTS TINY_SPCS.TINY_112_BYTES;"
+snow sql -c spcs -q "SELECT CURRENT_USER(), CURRENT_ACCOUNT(), CURRENT_ROLE();"
 ```
 
-### 2.2 Create Compute Pool
+Expected output:
+
+```
++------------------------------------------------------------------------------+
+| CURRENT_USER() | CURRENT_ACCOUNT() | CURRENT_ROLE() |
+|----------------+-------------------+----------------|
+| YOUR_USERNAME  | YOUR_ACCOUNT      | ACCOUNTADMIN   |
++------------------------------------------------------------------------------+
+```
+
+If you see an error, check:
+1. Token file path is absolute and correct
+2. Token hasn't expired
+3. Network policy is applied to your user
+4. Account locator matches your Snowsight URL
+
+---
+
+## Step 7: Create Snowflake Infrastructure
+
+### 7.1 Create Database and Schema
+
+```bash
+snow object create database name=TINY_SPCS --if-not-exists -c spcs
+snow object create schema name=TINY_112_BYTES --database TINY_SPCS --if-not-exists -c spcs
+```
+
+### 7.2 Create Compute Pool
 
 The compute pool provides the infrastructure to run containers:
-
-```sql
-CREATE COMPUTE POOL IF NOT EXISTS TINY_POOL
-  MIN_NODES = 1
-  MAX_NODES = 1
-  INSTANCE_FAMILY = CPU_X64_XS
-  AUTO_SUSPEND_SECS = 300;
-```
-
-Using the CLI:
 
 ```bash
 snow spcs compute-pool create TINY_POOL \
@@ -139,18 +300,12 @@ snow spcs compute-pool create TINY_POOL \
 Wait for the compute pool to be ready:
 
 ```bash
-snow spcs compute-pool status TINY_POOL -c spcs
+snow spcs compute-pool describe TINY_POOL -c spcs --format JSON
 ```
 
-The pool is ready when status shows `ACTIVE` or `IDLE`.
+The pool is ready when `state` shows `ACTIVE` or `IDLE`.
 
-### 2.3 Create Image Repository
-
-```sql
-CREATE IMAGE REPOSITORY IF NOT EXISTS TINY_SPCS.TINY_112_BYTES.IMAGES;
-```
-
-Using the CLI:
+### 7.3 Create Image Repository
 
 ```bash
 snow spcs image-repository create IMAGES \
@@ -175,9 +330,9 @@ YOUR_ACCOUNT.registry.snowflakecomputing.com/tiny_spcs/tiny_112_bytes/images
 
 ---
 
-## Step 3: Build and Push Docker Image
+## Step 8: Build and Push Docker Image
 
-### 3.1 Create the Dockerfile
+### 8.1 Create the Dockerfile
 
 Create a `Dockerfile` in the same directory as the binary:
 
@@ -194,7 +349,7 @@ COPY hello_snowflake_64_112 /hello_snowflake
 CMD ["/hello_snowflake"]
 ```
 
-### 3.2 Build the Image
+### 8.2 Build the Image
 
 ```bash
 docker build --platform linux/amd64 -t smallest_spcs:112bytes .
@@ -208,7 +363,7 @@ docker images smallest_spcs:112bytes
 
 Expected output shows ~112 bytes (displayed as 112B or similar).
 
-### 3.3 Test Locally
+### 8.3 Test Locally
 
 Before pushing to Snowflake, verify the container works.
 
@@ -239,7 +394,7 @@ Hello, Snowflake
 Exit: 0
 ```
 
-### 3.4 Tag for Snowflake Registry
+### 8.4 Tag for Snowflake Registry
 
 Replace `YOUR_ACCOUNT` with your account locator:
 
@@ -248,13 +403,13 @@ docker tag smallest_spcs:112bytes \
   YOUR_ACCOUNT.registry.snowflakecomputing.com/tiny_spcs/tiny_112_bytes/images/smallest_spcs:112bytes
 ```
 
-### 3.5 Authenticate to Snowflake Registry
+### 8.5 Authenticate to Snowflake Registry
 
 ```bash
 snow spcs image-registry login -c spcs
 ```
 
-### 3.6 Push the Image
+### 8.6 Push the Image
 
 ```bash
 docker push \
@@ -272,15 +427,15 @@ snow spcs image-repository list-images IMAGES \
 
 ---
 
-## Step 4: Set Up Event Table for Logging
+## Step 9: Set Up Event Table for Logging
 
-### 4.1 Create Event Table
+### 9.1 Create Event Table
 
 ```sql
 CREATE EVENT TABLE IF NOT EXISTS TINY_SPCS.TINY_112_BYTES.EVENTS;
 ```
 
-### 4.2 Associate Event Table with Database
+### 9.2 Associate Event Table with Database
 
 ```sql
 ALTER DATABASE TINY_SPCS SET EVENT_TABLE = TINY_SPCS.TINY_112_BYTES.EVENTS;
@@ -297,9 +452,9 @@ snow sql -c spcs -q "ALTER DATABASE TINY_SPCS SET LOG_LEVEL = 'INFO';"
 
 ---
 
-## Step 5: Create and Run the Job
+## Step 10: Create and Run the Job
 
-### 5.1 Create Service Specification
+### 10.1 Create Service Specification
 
 Create `tiny_spec.yaml`:
 
@@ -310,83 +465,88 @@ spec:
       image: /tiny_spcs/tiny_112_bytes/images/smallest_spcs:112bytes
 ```
 
-### 5.2 Create the Job Service
+### 10.2 Execute the Job
+
+Use `execute-job` for one-shot jobs (waits for completion):
 
 ```bash
-snow spcs service create TINY_JOB \
-  --spec-path tiny_spec.yaml \
+snow spcs service execute-job TINY_JOB \
   --compute-pool TINY_POOL \
+  --spec-path tiny_spec.yaml \
   --database TINY_SPCS \
   --schema TINY_112_BYTES \
   -c spcs
 ```
 
-### 5.3 Check Job Status
+Expected output:
+```
+Job TINY_JOB completed successfully with status: DONE.
+```
+
+### 10.3 Check Job Details (Optional)
 
 ```bash
-snow spcs service status TINY_JOB \
+snow spcs service describe TINY_JOB \
   --database TINY_SPCS \
   --schema TINY_112_BYTES \
-  -c spcs
+  -c spcs --format JSON
 ```
 
-Expected output shows:
-- **status**: DONE
-- **message**: Completed successfully
-- **lastExitCode**: 0
+Verify `status` is `DONE` and `is_job` is `true`.
 
 ---
 
-## Step 6: Verify the Output
+## Step 11: Verify the Output
 
-### 6.1 Query the Event Table
+### 11.1 View Container Logs
 
-```sql
-SELECT
-  TIMESTAMP,
-  RECORD_TYPE,
-  VALUE
-FROM TINY_SPCS.TINY_112_BYTES.EVENTS
-WHERE RECORD_TYPE = 'LOG'
-ORDER BY TIMESTAMP DESC
-LIMIT 10;
+To see the actual output from the container:
+
+```bash
+snow spcs service logs TINY_JOB \
+  --container-name hello \
+  --instance-id 0 \
+  --database TINY_SPCS \
+  --schema TINY_112_BYTES \
+  -c spcs
 ```
 
-Using the CLI:
+Expected output:
+
+```
+Hello, Snowflake
+```
+
+### 11.2 View Logs in Snowsight
+
+You can also view container logs directly in the Snowsight UI:
+
+1. Go to **Data Products** → **Apps** (or search for "TINY_JOB")
+2. Click on **TINY_JOB**
+3. Select the **Logs** tab
+4. Click **Historical** to see past logs
+
+![Snowsight Job Logs](img/snowsight-job-logs.png)
+
+The logs panel shows the "Hello, Snowflake" output from stdout with timestamp, container name, and instance details.
+
+### 11.3 View Lifecycle Events (Optional)
+
+The event table captures container lifecycle events:
 
 ```bash
 snow sql -c spcs -q "
-  SELECT TIMESTAMP, RECORD_TYPE, VALUE
+  SELECT TIMESTAMP, VALUE:message::STRING as message
   FROM TINY_SPCS.TINY_112_BYTES.EVENTS
-  WHERE RECORD_TYPE = 'LOG'
   ORDER BY TIMESTAMP DESC
   LIMIT 10;
 "
 ```
 
-Expected output:
-
-| TIMESTAMP | RECORD_TYPE | VALUE |
-|-----------|-------------|-------|
-| 2026-01-04 21:06:09 | LOG | "Hello, Snowflake" |
-
-### 6.2 View All Events (Optional)
-
-```sql
-SELECT
-  TIMESTAMP,
-  RECORD_TYPE,
-  VALUE
-FROM TINY_SPCS.TINY_112_BYTES.EVENTS
-ORDER BY TIMESTAMP DESC
-LIMIT 20;
-```
-
 This shows the complete job lifecycle:
-- `PENDING` - Job waiting to start
-- `READY` - Container running
-- `LOG` - "Hello, Snowflake" output
-- `DONE` - Completed successfully
+- `Compute pool node(s) are being provisioned`
+- `Waiting to start`
+- `Completed successfully`
 
 ---
 
@@ -394,23 +554,10 @@ This shows the complete job lifecycle:
 
 To remove all resources created by this guide:
 
-```sql
--- Drop the job service
-DROP SERVICE IF EXISTS TINY_SPCS.TINY_112_BYTES.TINY_JOB;
-
--- Drop the compute pool (may take a minute)
-DROP COMPUTE POOL IF EXISTS TINY_POOL;
-
--- Drop the database (includes schema, event table, image repository)
-DROP DATABASE IF EXISTS TINY_SPCS;
-```
-
-Using the CLI:
-
 ```bash
 snow spcs service drop TINY_JOB --database TINY_SPCS --schema TINY_112_BYTES -c spcs
 snow spcs compute-pool drop TINY_POOL -c spcs
-snow sql -c spcs -q "DROP DATABASE IF EXISTS TINY_SPCS;"
+snow object drop database TINY_SPCS -c spcs
 ```
 
 ---
@@ -421,29 +568,29 @@ snow sql -c spcs -q "DROP DATABASE IF EXISTS TINY_SPCS;"
 
 ```bash
 # 1. Create infrastructure
-snow sql -c spcs -q "CREATE DATABASE IF NOT EXISTS TINY_SPCS;"
-snow sql -c spcs -q "CREATE SCHEMA IF NOT EXISTS TINY_SPCS.TINY_112_BYTES;"
-snow spcs compute-pool create TINY_POOL --min-nodes 1 --max-nodes 1 --family CPU_X64_XS -c spcs
+snow object create database name=TINY_SPCS --if-not-exists -c spcs
+snow object create schema name=TINY_112_BYTES --database TINY_SPCS --if-not-exists -c spcs
+snow spcs compute-pool create TINY_POOL --min-nodes 1 --max-nodes 1 --family CPU_X64_XS --auto-suspend-secs 300 -c spcs
 snow spcs image-repository create IMAGES --database TINY_SPCS --schema TINY_112_BYTES -c spcs
 
-# 2. Build, test locally, and push image
+# 2. Wait for compute pool (check state is IDLE or ACTIVE)
+snow spcs compute-pool describe TINY_POOL -c spcs --format JSON
+
+# 3. Build and push image
 docker build --platform linux/amd64 -t smallest_spcs:112bytes .
-docker run --rm --platform linux/amd64 smallest_spcs:112bytes  # Should print "Hello, Snowflake"
 docker tag smallest_spcs:112bytes YOUR_ACCOUNT.registry.snowflakecomputing.com/tiny_spcs/tiny_112_bytes/images/smallest_spcs:112bytes
 snow spcs image-registry login -c spcs
 docker push YOUR_ACCOUNT.registry.snowflakecomputing.com/tiny_spcs/tiny_112_bytes/images/smallest_spcs:112bytes
 
-# 3. Set up logging
+# 4. Set up logging (requires SQL - no CLI equivalent)
 snow sql -c spcs -q "CREATE EVENT TABLE IF NOT EXISTS TINY_SPCS.TINY_112_BYTES.EVENTS;"
-snow sql -c spcs -q "ALTER DATABASE TINY_SPCS SET EVENT_TABLE = TINY_SPCS.TINY_112_BYTES.EVENTS;"
-snow sql -c spcs -q "ALTER DATABASE TINY_SPCS SET LOG_LEVEL = 'INFO';"
+snow sql -c spcs -q "ALTER DATABASE TINY_SPCS SET EVENT_TABLE = TINY_SPCS.TINY_112_BYTES.EVENTS; ALTER DATABASE TINY_SPCS SET LOG_LEVEL = 'INFO';"
 
-# 4. Run the job
-snow spcs service create TINY_JOB --spec-path tiny_spec.yaml --compute-pool TINY_POOL --database TINY_SPCS --schema TINY_112_BYTES -c spcs
+# 5. Run the job
+snow spcs service execute-job TINY_JOB --compute-pool TINY_POOL --spec-path tiny_spec.yaml --database TINY_SPCS --schema TINY_112_BYTES -c spcs
 
-# 5. Verify
-snow spcs service status TINY_JOB --database TINY_SPCS --schema TINY_112_BYTES -c spcs
-snow sql -c spcs -q "SELECT TIMESTAMP, VALUE FROM TINY_SPCS.TINY_112_BYTES.EVENTS WHERE RECORD_TYPE = 'LOG' ORDER BY TIMESTAMP DESC LIMIT 5;"
+# 6. Verify
+snow spcs service logs TINY_JOB --container-name hello --instance-id 0 --database TINY_SPCS --schema TINY_112_BYTES -c spcs
 ```
 
 ---
@@ -537,147 +684,30 @@ The binary achieves 112 bytes through extreme header abuse:
 
 ## Building From Source
 
+The assembly source code is provided in the [Assembly Source Code](#assembly-source-code) section above. Save it to `hello_snowflake_64_112.asm` and follow the instructions below.
+
 ### Native Linux
 
-If you're on a Linux system with NASM installed:
-
 ```bash
-# Install NASM (if not already installed)
+# Install NASM
 sudo apt install nasm    # Debian/Ubuntu
 sudo dnf install nasm    # Fedora/RHEL
 
-# Save the assembly source to a file
-cat > hello_snowflake_64_112.asm << 'EOF'
-; hello_snowflake_64_112.asm - 112-byte "Hello, Snowflake" ELF
-BITS 64
-base equ 0x10000
-ORG base
-
-ehdr:
-    db 0x7f, "ELF"
-    db 2, 1, 1, 0
-
-frag1:
-    syscall
-    pop rdi
-    push rcx
-    mov eax, edi
-    jmp short frag2
-
-    dw 2
-    dw 0x3e
-
-exit_code:
-    mov al, 1
-    int 0x80
-
-    dq frag1
-    dq phdr - ehdr
-
-frag2:
-    push qword [rcx + 0x5e]
-    push qword [rcx + 0x46]
-    mov dl, 17
-
-frag3:
-    push rsp
-    pop rsi
-    syscall
-
-    dw 0xdeeb
-    dw 56
-
-phdr:
-    dd 1
-    dd 5
-    dq 0
-    dq base
-    db "Hello, S"
-    dq file_end - ehdr
-    dq file_end - ehdr
-    db "nowflake"
-
-file_end:
-EOF
-
-# Compile
+# Compile (assumes hello_snowflake_64_112.asm exists)
 nasm -f bin -o hello_snowflake_64_112 hello_snowflake_64_112.asm
-
-# Make executable
 chmod +x hello_snowflake_64_112
 
-# Verify size (should be exactly 112 bytes)
-ls -l hello_snowflake_64_112
-
-# Run
-./hello_snowflake_64_112
-```
-
-Expected output:
-
-```
-Hello, Snowflake
+# Verify size and run
+ls -l hello_snowflake_64_112    # Should be exactly 112 bytes
+./hello_snowflake_64_112        # Output: Hello, Snowflake
 ```
 
 ### Using Docker (macOS/Windows)
 
-If you're on macOS or Windows (or prefer not to install NASM locally):
+If you don't have NASM installed locally:
 
 ```bash
-# Save the assembly source to a file first (same as above)
-cat > hello_snowflake_64_112.asm << 'EOF'
-BITS 64
-base equ 0x10000
-ORG base
-
-ehdr:
-    db 0x7f, "ELF"
-    db 2, 1, 1, 0
-
-frag1:
-    syscall
-    pop rdi
-    push rcx
-    mov eax, edi
-    jmp short frag2
-
-    dw 2
-    dw 0x3e
-
-exit_code:
-    mov al, 1
-    int 0x80
-
-    dq frag1
-    dq phdr - ehdr
-
-frag2:
-    push qword [rcx + 0x5e]
-    push qword [rcx + 0x46]
-    mov dl, 17
-
-frag3:
-    push rsp
-    pop rsi
-    syscall
-
-    dw 0xdeeb
-    dw 56
-
-phdr:
-    dd 1
-    dd 5
-    dq 0
-    dq base
-    db "Hello, S"
-    dq file_end - ehdr
-    dq file_end - ehdr
-    db "nowflake"
-
-file_end:
-EOF
-
-# Compile and run in one Docker command
+# Compile and run in Docker (assumes hello_snowflake_64_112.asm exists)
 docker run --rm --platform linux/amd64 \
   -v "$(pwd):/work" -w /work \
   debian:bookworm-slim \
@@ -686,13 +716,6 @@ docker run --rm --platform linux/amd64 \
          chmod +x hello_snowflake_64_112 && \
          ls -l hello_snowflake_64_112 && \
          ./hello_snowflake_64_112'
-```
-
-Expected output:
-
-```
--rwxr-xr-x 1 root root 112 Jan  4 12:00 hello_snowflake_64_112
-Hello, Snowflake
 ```
 
 ### Quick Docker Test (Pre-built Binary)
@@ -712,6 +735,70 @@ Expected output:
 Hello, Snowflake
 Exit code: 0
 ```
+
+---
+
+## Automating with Claude Code
+
+You can use [Claude Code](https://claude.ai/claude-code) (Anthropic's AI coding agent) to run through this entire guide automatically. This is useful for:
+
+- Quick deployment to a new Snowflake trial account
+- Validating the guide works end-to-end
+- Learning how the commands work by watching Claude execute them
+
+### Prerequisites
+
+1. Clone this repository
+2. Complete Steps 1-4 manually (account creation, network policy, CLI installation, PAT token)
+3. Save your PAT token to `.env-token` in the project directory
+
+### Example Prompt
+
+Copy and modify this prompt for your Snowflake account:
+
+```
+Follow the instructions in @SPCS_DEPLOYMENT_GUIDE.md and perform the scenario end-to-end.
+
+Snowflake account: RQBSWTT-AE95171.snowflakecomputing.com
+User: wkot
+
+Assumptions:
+- Network policies have been configured to allow access from local Snow CLI
+- PAT token is saved in .env-token
+- For Snow CLI connection, use database and schema names from the document
+- This test runs on native Linux (or use the Rosetta version for Mac)
+
+Steps:
+1. First validate Snow CLI connectivity
+2. Then perform the smallest SPCS container deployment
+3. Verify the output shows "Hello, Snowflake"
+```
+
+### What Claude Code Will Do
+
+When given this prompt, Claude Code will:
+
+1. **Configure Snow CLI** - Create/update `~/.snowflake/config.toml` with your connection details
+2. **Validate connectivity** - Run `snow connection test -c spcs`
+3. **Create infrastructure** - Database, schema, compute pool, and image repository
+4. **Build and push** - Docker image with the 112-byte binary
+5. **Execute the job** - Run the container on SPCS
+6. **Verify output** - Check logs for "Hello, Snowflake"
+
+### Customizing the Prompt
+
+Replace these values with your own:
+
+| Placeholder | Example | Description |
+|-------------|---------|-------------|
+| `RQBSWTT-AE95171` | `QWUPFFL-VH04737` | Your account locator |
+| `wkot` | `waldek` | Your Snowflake username |
+
+### Notes
+
+- Claude Code will ask for permission before running commands
+- The entire deployment typically completes in 5-10 minutes (mostly waiting for compute pool)
+- If something fails, Claude Code can diagnose and retry
 
 ---
 
@@ -741,7 +828,7 @@ exec /hello_snowflake: exec format error
 
 Check the pool status:
 ```bash
-snow spcs compute-pool status TINY_POOL -c spcs
+snow spcs compute-pool describe TINY_POOL -c spcs --format JSON
 ```
 
 If stuck in `STARTING`, wait a few minutes. If `FAILED`, check your account's compute pool quota.
@@ -752,17 +839,13 @@ If stuck in `STARTING`, wait a few minutes. If `FAILED`, check your account's co
 2. Verify the repository exists: `snow spcs image-repository list --database TINY_SPCS --schema TINY_112_BYTES -c spcs`
 3. Check the image tag matches the repository URL exactly
 
-### No Logs in Event Table
+### No Output in Service Logs
 
-1. Verify event table is set:
-   ```sql
-   SHOW PARAMETERS LIKE 'EVENT_TABLE' IN DATABASE TINY_SPCS;
-   ```
-2. Verify log level:
-   ```sql
-   SHOW PARAMETERS LIKE 'LOG_LEVEL' IN DATABASE TINY_SPCS;
-   ```
-3. Re-run the job after setting parameters
+If `snow spcs service logs` returns empty:
+
+1. Verify the service completed: check status shows `DONE` with `lastExitCode: 0`
+2. Ensure you're using the correct `--instance-id` (typically `0`)
+3. The container may have crashed before producing output - check the service status message
 
 ### Job Shows Exit Code != 0
 
