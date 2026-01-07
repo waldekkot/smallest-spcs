@@ -2,6 +2,8 @@
 
 The world's smallest container for Snowflake Snowpark Container Services - a **112-byte** hand-crafted x86-64 ELF binary that prints "Hello, Snowflake" and exits.
 
+Context: https://www.linkedin.com/posts/waldemar-kot-6737311_snowflake-activity-7413743331425386496-_CTQ?utm_source=share&utm_medium=member_desktop&rcm=ACoAAABJIXcBF4e0i7rjzgR3lsUYw34F0bPAB0Y
+
 ## Why 112 Bytes?
 
 This is the theoretical minimum for a 64-bit ELF on native Linux:
